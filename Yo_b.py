@@ -3172,212 +3172,6 @@ class HealthInsuranceRenewalBot:
                 client.status = ClientStatus.ERROR
                 client.error_message = "Continue with plan missing"
                 return client.status
-
-
-                logging.error(f"Ã¢ÂÅ’ Could not click Review plan: {str(e)}")
-                client.status = ClientStatus.ERROR
-                client.error_message = "Review plan button missing"
-                if same_tab:
-                    try:
-                        self.driver.back()
-                        time.sleep(0.75)
-                    except Exception:
-                        pass
-                else:
-                    self._cleanup_non_main_tabs()
-                return client.status
-            def process_client(self, client: ClientData) -> str:
-                """Main workflow for processing client renewal."""
-                client.timestamp_start = datetime.now(timezone.utc).isoformat()
-                client.status = ClientStatus.IN_PROGRESS
-                logging.info(f"🚀 Processing client: {client.full_name} (Row {client.row_index})")
-
-                try:
-                    # Initialize same_tab variable early
-                    same_tab = False
-
-                    # STOP Check
-                    self.state.wait_if_paused()
-                    if self.state.check_stopped():
-                        logging.error("Operation stopped. Exiting client processing.")
-                        client.status = ClientStatus.ERROR
-                        client.error_message = "Stopped by user"
-                        return client.status
-
-                    # Skip Check
-                    if self.state.check_skip():
-                        logging.warning(f"Skipping {client.full_name} as requested.")
-                        client.status = ClientStatus.SKIPPED_BY_USER
-                        client.error_message = "Skipped by user"
-                        return client.status
-
-                    # Process Plan Decision and Enrollment
-                    premium, carrier = self.get_current_plan_premium_from_summary()
-                    client.carrier = carrier
-                    client.premium = f"${premium:.2f}"
-
-                    if self.should_enroll_directly(premium, carrier):
-                        logging.info(f"Enrolling directly in {carrier} @ ${premium:.2f}/mo")
-                        if not self.handle_confirm_plan_page(client):
-                            logging.warning(f"Enrollment failed for client: {client.full_name}.")
-                            return client.status  # Status set within handle_confirm_plan_page
-                    else:
-                        logging.info(f"Exploring alternatives for {client.full_name} with premium: ${premium:.2f}")
-                        try:
-                            # Handle plan switching logic
-                            if not self.click_change_plans():
-                                raise Exception("Change plans link not found")
-
-                            self.filter_by_approved_carriers()
-                            if not self.select_top_zero_premium_plan():
-                                raise Exception("No $0.00 plans found after filtering.")
-
-                            self.wait_for_congratulations_page()
-                            client.status = ClientStatus.COMPLETED
-                            client.timestamp_end = datetime.now(timezone.utc).isoformat()
-                            logging.info(f"🎉 {client.full_name} - COMPLETED (plan switch)")
-
-                        except Exception as e:
-                            logging.error(f"Plan selection failed: {str(e)}")
-                            client.status = ClientStatus.ERROR
-                            client.error_message = f"Plan selection failed: {str(e)}"
-
-                    return client.status
-
-                except Exception as e:
-                    logging.error(f"Fatal error processing {client.full_name}: {e}")
-                    client.status = ClientStatus.ERROR
-                    client.error_message = str(e)
-                    return client.status
-            
-            # Plan Decision
-            self.state.wait_if_paused()
-            if self.state.check_stopped():
-                client.status = ClientStatus.ERROR
-                client.error_message = "Stopped by user"
-                return client.status
-            
-            if self.state.check_skip():
-                logging.warning(f"Ã¢ÂÂ­Ã¯Â¸Â Skipping {client.full_name} (user requested)")
-                client.status = ClientStatus.SKIPPED_BY_USER
-                client.error_message = "Skipped by user"
-                if same_tab:
-                    try:
-                        self.driver.back()
-                        time.sleep(0.75)
-                    except Exception:
-                        pass
-                else:
-                    self._cleanup_non_main_tabs()
-                return client.status
-            
-                # After clicking 'Review plan', re-extract plan details!
-                premium, carrier = self.get_current_plan_premium_from_summary()
-
-                if self.should_enroll_directly(premium, carrier):
-                    self.logger.info(f"[+] Plan is $0.00 and supported carrier: {carrier}. Clicking Enroll in this plan!")
-                    # Wait for and click the "Enroll in this plan" button directly
-                    try:
-                        enroll_selectors = [
-                            (By.XPATH, "//button[normalize-space()='Enroll in this plan']"),
-                            (By.CSS_SELECTOR, "button[type='submit'][data-layer='enroll_in_application']"),
-                            (By.XPATH, "//button[@type='submit' and contains(text(), 'Enroll')]"),
-                        ]
-                        for by, selector in enroll_selectors:
-                            try:
-                                btn = WebDriverWait(self.driver, 5).until(
-                                    EC.element_to_be_clickable((by, selector))
-                                )
-                                self.driver.execute_script(
-                                    "arguments[0].scrollIntoView({behavior: 'instant', block: 'center'});", btn
-                                )
-                                time.sleep(0.5)
-                                btn.click()
-                                self.logger.info(f"[+] Successfully clicked: Enroll in this plan")
-                                break
-                            except TimeoutException:
-                                continue
-                        else:
-                            raise Exception("No Enroll in this plan button found after 'Review plan'.")
-                    except Exception as e:
-                        self.logger.error(f"[X] Could not enroll directly: {e}")
-                        # Optionally handle/make a screenshot
-                        return
-                    # After click, just wait for congrats page, done!
-                    self.wait_for_congratulations_page()
-                    self.logger.info(f"[DONE] {client.full_name} - COMPLETED (direct enrollment)")
-                    # CLEAN exit for this client, don't proceed with carrier filtering
-                    return
-                else:
-                    # NOT supported, or not zero premium: proceed with "Change plans" etc
-                    self.logger.info("[!] Not supported carrier/zero: proceeding to Change plans, filters, and new search")
-                    # Existing logic for carrier filter, 0.00 plan selection, etc.                
-                try:
-                    if not self.click_change_plans():
-                        raise Exception("Change plans link not found")
-                    
-                    self.filter_by_approved_carriers()
-
-                    try:
-                        selected_carriers = self.driver.find_elements(
-                            By.XPATH,
-                            "//input[@type='checkbox' and @checked and contains(@name, 'issuer')]"
-                        )
-                        if len(selected_carriers) == 0:
-                            logging.error("Ã¢ÂÅ’ No carriers were selected - cannot find plans")
-                            raise Exception("No approved carriers available in this ZIP code")
-                    except Exception as carrier_check_err:
-                        logging.debug(f"Carrier selection check failed: {str(carrier_check_err)[:60]}")
-
-                    if not self.select_top_zero_premium_plan():
-                        raise Exception("No $0.00 plans found after filtering")
-                    
-                    if self.driver.find_elements(By.XPATH, "//button[contains(text(), 'Add to cart')]"):
-                        logging.info("Ã°Å¸â€œâ€¹ Detected 'Add to cart' flow")
-                        if not self.handle_add_to_cart_flow():
-                            raise Exception("Add to cart flow failed")
-                    else:
-                        logging.info("Ã°Å¸â€œâ€¹ Detected 'View in cart' flow")
-                        if not self.handle_view_in_cart_flow():
-                            raise Exception("View in cart flow failed")
-                    
-                    self.wait_for_congratulations_page()
-                    
-                    client.status = ClientStatus.COMPLETED
-                    client.timestamp_end = datetime.now(timezone.utc).isoformat()
-                    logging.info(f"Ã¢Å“â€¦ {client.full_name} - COMPLETED (plan switch)")
-                    
-                except Exception as e:
-                    logging.error(f"Ã¢ÂÅ’ Plan selection failed: {str(e)}")
-                    client.status = ClientStatus.ERROR
-                    client.error_message = f"Plan selection failed: {str(e)}"
-            
-            # CLEANUP
-            try:
-                if same_tab:
-                    try:
-                        self.driver.back()
-                        time.sleep(1.1)
-                        if CLIENT_LIST_URL not in (self.driver.current_url or ""):
-                            logging.info("Ã°Å¸â€Â Re-navigating to client list URL")
-                            self.driver.get(CLIENT_LIST_URL)
-                            time.sleep(0.75)
-                    except Exception:
-                        logging.warning("Could not navigate back after same-tab flow")
-                        if self.main_tab_handle in self.driver.window_handles:
-                            try:
-                                self.driver.switch_to.window(self.main_tab_handle)
-                            except Exception:
-                                pass
-                else:
-                    self._cleanup_non_main_tabs()
-                return client.status
-            except Exception as closing_err:
-                logging.error(f"Error during final cleanup: {closing_err}", exc_info=True)
-                client.status = ClientStatus.ERROR
-                client.error_message = "Cleanup error"
-                return client.status
-
         except Exception as e:
             logging.error(f"Ã¢ÂÅ’ Fatal error processing {client.full_name}: {e}", exc_info=True)
             client.status = ClientStatus.ERROR
@@ -3399,7 +3193,6 @@ class HealthInsuranceRenewalBot:
             return client.status
 
     def _cleanup_non_main_tabs(self):
-        # ... (your existing code)
         """Close all tabs except main_tab_handle and switch back to main."""
         try:
             for h in list(self.driver.window_handles):
@@ -3417,128 +3210,128 @@ class HealthInsuranceRenewalBot:
             logging.warning(f"Cleanup non-main tabs failed: {e}")
 
     def run(self):
-            """Main bot execution loop with DYNAMIC client list refresh."""
-            # FIX: Track processed clients to prevent infinite loops on missing SSNs
-            processed_full_names = set()
-            consecutive_same_client = 0
-            last_client_name = None
-        
+        """Main bot execution loop with DYNAMIC client list refresh."""
+        # FIX: Track processed clients to prevent infinite loops on missing SSNs
+        processed_full_names = set()
+        consecutive_same_client = 0
+        last_client_name = None
+    
+        try:
+            self.initialize_driver()
+            self.open_notepadpp_if_needed()
+            
             try:
-                self.initialize_driver()
-                self.open_notepadpp_if_needed()
+                self.main_tab_handle = self.driver.current_window_handle
+            except Exception:
+                logging.critical("Ã¢ÂÅ’ Could not get main tab handle")
+                raise
+            logging.info(f"Main tab handle: {self.main_tab_handle}")
+
+            initial_clients = self.read_client_table()
+            if not initial_clients:
+                logging.error("Ã¢ÂÅ’ No clients found in table")
+                return
+            
+            self.state.total_clients = len(initial_clients)
+            logging.info(f"Ã°Å¸â€œÅ  Found {self.state.total_clients} clients initially")
+            
+            processed_count = 0
+            max_iterations = self.state.total_clients + 5
+            
+            for iteration in range(max_iterations):
+                self.state.wait_if_paused()
+                if self.state.check_stopped():
+                    logging.critical("Ã°Å¸â€ºâ€˜ Stopped by user")
+                    break
                 
                 try:
-                    self.main_tab_handle = self.driver.current_window_handle
-                except Exception:
-                    logging.critical("Ã¢ÂÅ’ Could not get main tab handle")
-                    raise
-                logging.info(f"Main tab handle: {self.main_tab_handle}")
-
-                initial_clients = self.read_client_table()
-                if not initial_clients:
-                    logging.error("Ã¢ÂÅ’ No clients found in table")
-                    return
+                    self.driver.switch_to.window(self.main_tab_handle)
+                except Exception as e:
+                    logging.critical(f"Ã¢ÂÅ’ Lost main tab: {e}")
+                    break
                 
-                self.state.total_clients = len(initial_clients)
-                logging.info(f"Ã°Å¸â€œÅ  Found {self.state.total_clients} clients initially")
+                current_clients = self.read_client_table()
                 
-                processed_count = 0
-                max_iterations = self.state.total_clients + 5
+                if not current_clients:
+                    logging.info("Ã¢Å“â€¦ Client list empty - all done")
+                    break
                 
-                for iteration in range(max_iterations):
-                    self.state.wait_if_paused()
-                    if self.state.check_stopped():
-                        logging.critical("Ã°Å¸â€ºâ€˜ Stopped by user")
-                        break
-                    
-                    try:
-                        self.driver.switch_to.window(self.main_tab_handle)
-                    except Exception as e:
-                        logging.critical(f"Ã¢ÂÅ’ Lost main tab: {e}")
-                        break
-                    
-                    current_clients = self.read_client_table()
-                    
-                    if not current_clients:
-                        logging.info("Ã¢Å“â€¦ Client list empty - all done")
-                        break
-                    
-                    if processed_count >= self.state.total_clients:
-                        logging.info(f"Ã¢Å“â€¦ Processed {processed_count} clients (target: {self.state.total_clients})")
-                        break
-                    
-                    client = current_clients[0]
-                    client.row_index = 1
-                    
-                    # FIX: Check if we're stuck on same client (missing SSN loop)
-                    if client.full_name == last_client_name:
-                        consecutive_same_client += 1
-                    else:
-                        consecutive_same_client = 0
-                    last_client_name = client.full_name
-                    
-                    # If stuck on same client 2+ times, skip permanently
-                    if consecutive_same_client >= 2:
-                        logging.error(f"âŒ STUCK on {client.full_name} - skipping permanently")
-                        processed_full_names.add(client.full_name)
-                        client.status = ClientStatus.SKIPPED_NO_SSN
-                        client.error_message = "Stuck in loop - likely missing SSN"
-                        self.clients.append(client)
-                        self.audit_log.append(client.to_dict())
-                        # Force remove from view
-                        try:
-                            self.driver.execute_script(
-                                "arguments[0].style.display = 'none';",
-                                self.driver.find_element(By.XPATH, "//tbody/tr[1]")
-                            )
-                        except:
-                            pass
-                        time.sleep(0.75)
-                        continue
-                    
-                    # Skip if already processed
-                    if client.full_name in processed_full_names:
-                        logging.warning(f"â­ï¸ Already processed {client.full_name} - skipping")
-                        continue
-                    
+                if processed_count >= self.state.total_clients:
+                    logging.info(f"Ã¢Å“â€¦ Processed {processed_count} clients (target: {self.state.total_clients})")
+                    break
+                
+                client = current_clients[0]
+                client.row_index = 1
+                
+                # FIX: Check if we're stuck on same client (missing SSN loop)
+                if client.full_name == last_client_name:
+                    consecutive_same_client += 1
+                else:
+                    consecutive_same_client = 0
+                last_client_name = client.full_name
+                
+                # If stuck on same client 2+ times, skip permanently
+                if consecutive_same_client >= 2:
+                    logging.error(f"âŒ STUCK on {client.full_name} - skipping permanently")
                     processed_full_names.add(client.full_name)
-                    processed_count += 1
-                    self.state.clients_processed = processed_count
-                    
-                    logging.info(f"\n[{processed_count}/{self.state.total_clients}] {client.full_name}")
-                    logging.info(f"Ã¢ÂÂ±Ã¯Â¸Â ETA: {self.state.estimated_time_remaining()}")
-                    
-                    result = self.process_client(client)
-                    
+                    client.status = ClientStatus.SKIPPED_NO_SSN
+                    client.error_message = "Stuck in loop - likely missing SSN"
                     self.clients.append(client)
                     self.audit_log.append(client.to_dict())
-                    
+                    # Force remove from view
                     try:
-                        if processed_count < self.state.total_clients:
-                            logging.info("Ã°Å¸â€â€ž Soft refresh (F5) before next client...")
-                            self.driver.refresh()
-                            time.sleep(1.5)  # +0.2s buffer
-                            logging.info("Ã¢Å“â€¦ Table soft-refreshed (filters preserved).")
-                    except Exception as refresh_err:
-                        logging.warning(f"Ã¢Å¡Â Ã¯Â¸Â Soft refresh failed: {refresh_err}")
+                        self.driver.execute_script(
+                            "arguments[0].style.display = 'none';",
+                            self.driver.find_element(By.XPATH, "//tbody/tr[1]")
+                        )
+                    except:
+                        pass
+                    time.sleep(0.75)
+                    continue
+                
+                # Skip if already processed
+                if client.full_name in processed_full_names:
+                    logging.warning(f"â­ï¸ Already processed {client.full_name} - skipping")
+                    continue
+                
+                processed_full_names.add(client.full_name)
+                processed_count += 1
+                self.state.clients_processed = processed_count
+                
+                logging.info(f"\n[{processed_count}/{self.state.total_clients}] {client.full_name}")
+                logging.info(f"Ã¢ÂÂ±Ã¯Â¸Â ETA: {self.state.estimated_time_remaining()}")
+                
+                result = self.process_client(client)
+                
+                self.clients.append(client)
+                self.audit_log.append(client.to_dict())
+                
+                try:
+                    if processed_count < self.state.total_clients:
+                        logging.info("Ã°Å¸â€â€ž Soft refresh (F5) before next client...")
+                        self.driver.refresh()
+                        time.sleep(1.5)  # +0.2s buffer
+                        logging.info("Ã¢Å“â€¦ Table soft-refreshed (filters preserved).")
+                except Exception as refresh_err:
+                    logging.warning(f"Ã¢Å¡Â Ã¯Â¸Â Soft refresh failed: {refresh_err}")
 
-                    try:
-                        self.driver.switch_to.window(self.main_tab_handle)
-                        time.sleep(0.5)  # +0.2s buffer
-                    except Exception as e:
-                        logging.error(f"Ã¢ÂÅ’ Could not return to main tab: {e}")
-                        break
-                
-                if iteration >= max_iterations - 1:
-                    logging.warning(f"Ã¢Å¡Â Ã¯Â¸Â Hit safety limit ({max_iterations} iterations)")
-                
-                self._generate_report()
-                
-            finally:
-                self._save_logs()
-                logging.info("Ã¢Å“â€¦ Bot run finished - leaving browser open")
-                
+                try:
+                    self.driver.switch_to.window(self.main_tab_handle)
+                    time.sleep(0.5)  # +0.2s buffer
+                except Exception as e:
+                    logging.error(f"Ã¢ÂÅ’ Could not return to main tab: {e}")
+                    break
             
+            if iteration >= max_iterations - 1:
+                logging.warning(f"Ã¢Å¡Â Ã¯Â¸Â Hit safety limit ({max_iterations} iterations)")
+            
+            self._generate_report()
+            
+        finally:
+            self._save_logs()
+            logging.info("Ã¢Å“â€¦ Bot run finished - leaving browser open")
+            
+        
     def handle_address_validation(self):
         """Handle address validation modal."""
         try:
